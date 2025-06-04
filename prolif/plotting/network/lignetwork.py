@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, Union, cast
 from uuid import uuid4
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 from rdkit import Chem
@@ -572,12 +573,16 @@ class LigNetwork:
                 "font": {"color": self._FONTCOLORS.get(restype, "black")},
                 "shape": "box",
                 "borderWidth": 0,
-                "physics": True,
+                "physics": False,
                 "mass": mass,
                 "group": "protein",
                 "residue_type": restype,
             }
             self._nodes[prot_res] = node
+
+        self._calculate_protein_node_coordinates_nx()
+
+        # Continue with interaction processing
         for (lig_res, prot_res, interaction, lig_indices), (
             weight,
             distance,
@@ -636,6 +641,183 @@ class LigNetwork:
                 edge["label"] = self._edge_label_formatter.format_map(int_data)
                 edge["font"] = self._edge_label_font
             self.edges.append(edge)
+
+    def _calculate_protein_node_coordinates_nx(self) -> None:
+        """Calculates 2D coordinates for protein nodes in self._nodes using NetworkX's spring_layout,
+        then centers them around the center.
+        Updates each protein node with 'x' and 'y' properties.
+        """
+
+        # 1. Extract protein nodes
+        protein_nodes = [node_id for node_id, node in self._nodes.items() if node.get("group") == "protein"]
+
+        # 2. Build a NetworkX graph with these nodes
+        G = nx.Graph()
+        G.add_nodes_from(protein_nodes)
+
+        # 3. Get center
+        center,width,length = self._get_ligand_center_and_dimensions()
+
+        # 4. Compute spring layout
+        pos = nx.spring_layout(G, k=200, fixed=None, center=center)
+
+        # Find the range of current x and y values
+        min_x = min(p[0] for p in pos.values())
+        max_x = max(p[0] for p in pos.values())
+        min_y = min(p[1] for p in pos.values())
+        max_y = max(p[1] for p in pos.values())
+
+        current_width = max_x - min_x
+        current_height = max_y - min_y
+
+        # Desired total width/height for the layout
+        desired_width = 700
+        desired_height = 700 # can be adjusted as needed
+
+        # Calculate scaling factors
+        scale_x = desired_width / current_width if current_width > 0 else 1
+        scale_y = desired_height / current_height if current_height > 0 else 1
+        scale_factor = max(scale_x, scale_y)
+
+        # Calculate the mean of the spring layout positions
+        layout_mean = np.mean([coords for coords in pos.values()], axis=0)
+
+        for node_id in protein_nodes:
+            # Shift to origin, scale, and then shift to center
+            original_coords = np.array(pos[node_id])
+            scaled_coords = (original_coords - layout_mean) * scale_factor + center
+
+            self._nodes[node_id]["x"] = float(scaled_coords[0])
+            self._nodes[node_id]["y"] = float(scaled_coords[1])
+
+    def _calculate_protein_node_coordinates(self) -> None:
+        """Calculates 2D coordinates for protein nodes in self._nodes based on their interaction points,
+        positioning each residue near the ligand atoms it interacts with.
+        Updates each protein node with 'x' and 'y' properties.
+        """
+
+        # 1. Extract protein nodes
+        protein_nodes = [node_id for node_id, node in self._nodes.items() if node.get("group") == "protein"]
+        
+        if not protein_nodes:
+            return
+
+        # 2. Get ligand (all) center and dimensions for reference
+        ligand_center, ligand_width, ligand_height = self._get_ligand_center_and_dimensions()
+        base_offset_distance = max(ligand_width, ligand_height) * 0.3 + 10  # minimum distance from interaction point
+        
+        # 3. Dictionary to store residue positions and track conflicts
+        residue_positions = {}
+        used_positions = []  # Track positions to avoid overlaps
+        min_distance_between_nodes = 40  # Minimum distance between protein nodes
+        
+        # 4. Process each interaction to position residues near their interaction points
+        for (lig_res, prot_res, interaction, lig_indices), (weight, distance, components) in self.df.iterrows():
+            if components.startswith("ligand") and prot_res in protein_nodes:
+                
+                # Get the interaction point on the ligand
+                if interaction in self._LIG_PI_INTERACTIONS:
+                    # For pi interactions, use ring centroid
+                    interaction_point = self._get_ring_centroid(lig_indices)
+                else:
+                    # For other interactions, use the displayed atom
+                    i = self._DISPLAYED_ATOM.get(interaction, 0)
+                    interaction_point = self.xyz[list(lig_indices)].mean(axis=0)
+                
+                # Calculate direction vector from ligand center to interaction point
+                direction = interaction_point[:2] - ligand_center
+                direction_norm = np.linalg.norm(direction)
+                
+                if direction_norm > 0:
+                    # Normalize direction and extend outward
+                    direction_unit = direction / direction_norm
+                    # Position residue outside the ligand
+                    residue_pos = interaction_point[:2] + direction_unit * base_offset_distance
+
+                    print(f"Positioning {prot_res} at {residue_pos}, direction = {direction_unit}")
+                else:
+                    # Fallback: position at a default offset
+                    angle = len(residue_positions) * (2 * np.pi / max(len(protein_nodes), 8))
+                    residue_pos = ligand_center + base_offset_distance * np.array([np.cos(angle), np.sin(angle)])
+                
+                # Check for conflicts with existing positions
+                conflict_resolved = False
+                max_attempts = 8
+                attempt = 0
+                
+                while not conflict_resolved and attempt < max_attempts:
+                    conflict_resolved = True
+                    
+                    # Check distance to all existing positions
+                    for existing_pos in used_positions:
+                        if np.linalg.norm(residue_pos - existing_pos) < min_distance_between_nodes:
+                            conflict_resolved = False
+                            break
+                    
+                    if not conflict_resolved:
+                        # Adjust position by rotating around the interaction point
+                        angle_offset = (attempt + 1) * (np.pi / 4)  # 45-degree increments
+                        rotation_matrix = np.array([[np.cos(angle_offset), -np.sin(angle_offset)],
+                                                  [np.sin(angle_offset), np.cos(angle_offset)]])
+                        
+                        # Rotate the offset vector
+                        offset_vector = direction_unit * base_offset_distance
+                        rotated_offset = rotation_matrix @ offset_vector
+                        residue_pos = interaction_point[:2] + rotated_offset
+                    
+                    attempt += 1
+                
+                # Store the position for this residue (only if not already positioned)
+                if prot_res not in residue_positions:
+                    residue_positions[prot_res] = residue_pos
+                    used_positions.append(residue_pos)
+        
+        # 5. Handle any remaining unpositioned residues (fallback)
+        positioned_residues = set(residue_positions.keys())
+        unpositioned_residues = [res for res in protein_nodes if res not in positioned_residues]
+        
+        if unpositioned_residues:
+            # Position remaining residues in a circle around the ligand
+            angle_step = 2 * np.pi / len(unpositioned_residues)
+            for i, residue in enumerate(unpositioned_residues):
+                angle = i * angle_step
+                pos = ligand_center + (base_offset_distance + 50) * np.array([np.cos(angle), np.sin(angle)])
+                
+                # Ensure no conflicts
+                while any(np.linalg.norm(pos - existing_pos) < min_distance_between_nodes 
+                         for existing_pos in used_positions):
+                    angle += np.pi / 8  # Rotate by 22.5 degrees
+                    pos = ligand_center + (base_offset_distance + 50) * np.array([np.cos(angle), np.sin(angle)])
+                
+                residue_positions[residue] = pos
+                used_positions.append(pos)
+        
+        # 6. Update protein node coordinates
+        for node_id in protein_nodes:
+            if node_id in residue_positions:
+                x, y = residue_positions[node_id]
+                self._nodes[node_id]["x"] = float(x)
+                self._nodes[node_id]["y"] = float(y)
+        
+        print(f"Positioned {len(residue_positions)} protein residues based on their interaction points")
+
+    def _get_ligand_center_and_dimensions(self):
+        """Calculate center and dimensions of the ligand using all atoms"""
+        # Get all atom coordinates
+        atom_coords = self.xyz[:, :2]  # Only use x,y coordinates
+    
+        # Find the bounding box
+        min_x = np.min(atom_coords[:, 0])
+        max_x = np.max(atom_coords[:, 0])
+        min_y = np.min(atom_coords[:, 1])
+        max_y = np.max(atom_coords[:, 1])
+    
+        # Calculate center and dimensions
+        center = np.array([(min_x + max_x) / 2, (min_y + max_y) / 2])
+        width = max_x - min_x
+        height = max_y - min_y
+    
+        return center, width, height
 
     def _get_ring_centroid(self, indices: tuple[int, ...]) -> "NDArray[np.float64]":
         """Find ring centroid coordinates using the indices of the ring atoms"""
