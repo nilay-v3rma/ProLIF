@@ -4,10 +4,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unrealised]
 
 ### Added
 
+- Support for `ImplicitHBAcceptor` and `ImplicitHBDonor` interactions to calculate  
+  hydrogen bond interactions with merely heavy atoms. This helps users to estimate 
+  the hydrogen bond interactions for structures from PDB database or AI-driven
+  methods (PR #284 with @yuyuan871111, PR #302). 
+- Added a new `protein_helper` function to parse the file and correct the connectivity 
+  of your topology easily with SMILES or CIF templates (PR #275 with @yuyuan871111,
+  PR #302).
+
+### Fixed
+
+- Added a parameter `sanitize` for `Fingerprint.plot_3d` and `Complex3D.display`
+  to sanitize the hydrogen-removed structures before visualization in 3D plot
+  (Issue #304, PR #345 by @yuyuan871111).
+- Removed charged atom from being considered for ionic and cation-pi interactions if it
+  is bonded to an atom with opposite charge (PR #288 by @wenyan4work).
+
+### Changed
+
+- Simplified `Hydrophobic` SMARTS for readability, without changing the meaning.
+
+## [2.1.0] - 2026-01-20
+
+### Added
+
+- Added a new `queue` parallelization strategy for trajectories, alongside the
+  existing `chunk` strategy, and some simple heuristics to decide
+  between the two. Users can also force the usage of one strategy or the other
+  through the `parallel_strategy` parameter.
+- Added `split_molecule` to split a molecule into components based on a predicate
+  function.
 - Added `select_over_trajectory` to easily make AtomGroup distance-based selections
   (including recursive selections) over the whole trajectory rather than just the first
   frame. This helps making optimised selections when a protein is highly flexible
@@ -48,6 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ResidueGroup` resnumbers are now declared as uint32 instead of uint16 (PR #315,
+  Issue #313).
 - SMARTS pattern for `Hydrophobic` were not matching as expected due to the presence of
   explicit hydrogens in the molecules. The SMARTS have been rewritten to account for
   this.
@@ -62,6 +94,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- For trajectory analysis, unless a number of jobs is specified through `n_jobs`
+  in `Fingerprint.run`, ProLIF will now use up to a maximum of 10 processes instead of
+  all available cores. The cap can be modified through the `PROLIF_MAX_N_JOBS`
+  environment variable.
+- `Fingerprint.run` now exposes a `parallel_strategy` parameter (`chunk`, `queue`, or
+  `None`).
+- Unpin the `numpy` version (PR #306 by @maabuu).
 - `Hydrophobic` SMARTS pattern now excludes all carbon linked to
   nitrogen/oxygen/fluoride from being hydrophobic, previous versions were allowing such
   carbons if they were aromatic.

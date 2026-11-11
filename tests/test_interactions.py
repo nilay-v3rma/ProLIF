@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Literal, cast
 
 import MDAnalysis as mda
@@ -9,9 +10,9 @@ from rdkit import Chem, RDLogger
 
 import prolif
 from prolif.fingerprint import Fingerprint
-from prolif.interactions import VdWContact
+from prolif.interactions import ImplicitHBAcceptor, VdWContact
 from prolif.interactions.base import _INTERACTIONS, Interaction
-from prolif.interactions.constants import VDW_PRESETS
+from prolif.interactions.constants import IDEAL_ATOM_ANGLES, VDW_PRESETS
 from prolif.interactions.utils import get_mapindex
 
 # Disable RDKit warnings
@@ -20,6 +21,7 @@ lg.setLevel(RDLogger.ERROR)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from contextlib import AbstractContextManager
 
     from MDAnalysis.core.groups import AtomGroup
     from MDAnalysis.core.universe import Universe
@@ -66,6 +68,16 @@ def interaction_qmol(
     return cast(
         Chem.Mol | list[Chem.Mol], getattr(interaction_instances[int_name], parameter)
     )
+
+
+@pytest.fixture(scope="module", params=[False, True])
+def ihb_include_water(request: pytest.FixtureRequest):  # type: ignore
+    return request.param
+
+
+@pytest.fixture(scope="module", params=[False, True])
+def ihb_ignore_geometry_checks(request: pytest.FixtureRequest):  # type: ignore
+    return request.param
 
 
 class TestInteractions:
@@ -132,6 +144,11 @@ class TestInteractions:
             ("metalacceptor", "metal", "ligand", False),
             ("vdwcontact", "benzene", "etf", True),
             ("vdwcontact", "hb_acceptor", "metal_false", False),
+            ("implicithbacceptor", "ihb_asp95a", "ihb_ligand", True),
+            ("implicithbacceptor", "ihb_acceptor_tyr167b", "ihb_ligand", True),
+            ("implicithbacceptor", "ihb_ligand", "ihb_acceptor_tyr167b", False),
+            ("implicithbdonor", "ihb_ligand", "ihb_asp95a", True),
+            ("implicithbdonor", "ihb_ligand", "ihb_acceptor_tyr167b", True),
         ],
         indirect=["any_mol", "any_other_mol"],
     )
@@ -237,100 +254,170 @@ class TestInteractions:
             vdw._get_radii_sum("X", "Y")
 
     @pytest.mark.parametrize(
-        ("interaction_qmol", "smiles", "expected"),
+        ("interaction_qmol", "smiles", "explicit_h_only", "expected"),
         [
-            ("Hydrophobic.lig_pattern", "C", 0),
-            ("Hydrophobic.lig_pattern", "C=[SH2]", 0),
-            ("Hydrophobic.lig_pattern", "c1cscc1", 5),
-            ("Hydrophobic.lig_pattern", "c1cocc1", 2),
-            ("Hydrophobic.lig_pattern", "[*]SC", 1),
-            ("Hydrophobic.lig_pattern", "[*]CC", 1),
-            ("Hydrophobic.lig_pattern", "[*]C=C", 1),
-            ("Hydrophobic.lig_pattern", "[*]=C=C", 1),
-            ("Hydrophobic.lig_pattern", "[*]C(=C)C", 1),
-            ("Hydrophobic.lig_pattern", "[*]C(C)C", 1),
-            ("Hydrophobic.lig_pattern", "CS(C)(C)C", 0),
-            ("Hydrophobic.lig_pattern", "FC(F)(F)F", 0),
-            ("Hydrophobic.lig_pattern", "BrI", 2),
-            ("Hydrophobic.lig_pattern", "C=O", 0),
-            ("Hydrophobic.lig_pattern", "C=N", 0),
-            ("Hydrophobic.lig_pattern", "CF", 0),
-            ("Hydrophobic.lig_pattern", "Nc1ccccc1", 5),
-            ("Hydrophobic.lig_pattern", "[*]C(C)(C)C", 1),
-            ("HBAcceptor.prot_pattern", "[OH2]", 2),
-            ("HBAcceptor.prot_pattern", "[NH3]", 3),
-            ("HBAcceptor.prot_pattern", "[NH4+]", 4),
-            ("HBAcceptor.prot_pattern", "[SH2]", 2),
-            ("HBAcceptor.prot_pattern", "O=C=O", 0),
-            ("HBAcceptor.prot_pattern", "c1c[nH+]ccc1", 0),
-            ("HBAcceptor.prot_pattern", "c1c[nH]cc1", 1),
-            ("HBAcceptor.prot_pattern", "c1c[nH+]c[nH]1", 2),
-            ("HBAcceptor.lig_pattern", "O", 1),
-            ("HBAcceptor.lig_pattern", "N", 1),
-            ("HBAcceptor.lig_pattern", "[NH4+]", 0),
-            ("HBAcceptor.lig_pattern", "N-C=O", 1),
-            ("HBAcceptor.lig_pattern", "N-C=[SH2]", 0),
-            ("HBAcceptor.lig_pattern", "[nH+]1ccccc1", 0),
-            ("HBAcceptor.lig_pattern", "n1ccccc1", 1),
-            ("HBAcceptor.lig_pattern", "n(C)1cccc1", 0),
-            ("HBAcceptor.lig_pattern", "[nH]1cccc1", 0),
-            ("HBAcceptor.lig_pattern", "[nH+]1nc[nH]c1", 0),
-            ("HBAcceptor.lig_pattern", "c12c([nH]cc1)cccc2", 0),
-            ("HBAcceptor.lig_pattern", "Nc1ccccc1", 0),
-            ("HBAcceptor.lig_pattern", "C(=N)(N)N", 0),
-            ("HBAcceptor.lig_pattern", "N#C", 1),
-            ("HBAcceptor.lig_pattern", "o1cccc1", 1),
-            ("HBAcceptor.lig_pattern", "[o+](C)1cccc1", 0),
-            ("HBAcceptor.lig_pattern", "[*]-[N+](=O)-[O-]", 0),
-            ("HBAcceptor.lig_pattern", "COC=O", 1),
-            ("HBAcceptor.lig_pattern", "c1ccccc1Oc1ccccc1", 0),
-            ("HBAcceptor.lig_pattern", "FC", 1),
-            ("HBAcceptor.lig_pattern", "Fc1ccccc1", 1),
-            ("HBAcceptor.lig_pattern", "FCF", 0),
-            ("XBAcceptor.prot_pattern", "CCl", 1),
-            ("XBAcceptor.prot_pattern", "c1ccccc1Cl", 1),
-            ("XBAcceptor.prot_pattern", "NCl", 1),
-            ("XBAcceptor.prot_pattern", "c1cccc[n+]1Cl", 1),
-            ("XBAcceptor.lig_pattern", "[NH3]", 3),
-            ("XBAcceptor.lig_pattern", "[NH+]C", 0),
-            ("XBAcceptor.lig_pattern", "c1ccccc1", 12),
-            ("XBAcceptor.lig_pattern", "C(=O)C", 1),
-            ("XBAcceptor.lig_pattern", "C#N", 0),
-            ("Cationic.lig_pattern", "[NH4+]", 1),
-            ("Cationic.lig_pattern", "[Ca+2]", 1),
-            ("Cationic.lig_pattern", "CC(=[NH2+])N", 2),
-            ("Cationic.lig_pattern", "NC(=[NH2+])N", 3),
-            ("Cationic.prot_pattern", "[Cl-]", 1),
-            ("Cationic.prot_pattern", "CC(=O)[O-]", 2),
-            ("Cationic.prot_pattern", "CS(=O)[O-]", 2),
-            ("Cationic.prot_pattern", "CP(=O)[O-]", 2),
-            ("CationPi.cation", "[NH4+]", 1),
-            ("CationPi.cation", "[Ca+2]", 1),
-            ("CationPi.cation", "CC(=[NH2+])N", 2),
-            ("CationPi.cation", "NC(=[NH2+])N", 3),
-            ("CationPi.pi_ring", "c1ccccc1", 1),
-            ("CationPi.pi_ring", "c1cocc1", 1),
-            ("EdgeToFace.pi_ring", "c1ccccc1", 1),
-            ("EdgeToFace.pi_ring", "c1cocc1", 1),
-            ("FaceToFace.pi_ring", "c1ccccc1", 1),
-            ("FaceToFace.pi_ring", "c1cocc1", 1),
-            ("MetalDonor.lig_pattern", "[Mg]", 1),
-            ("MetalDonor.prot_pattern", "O", 1),
-            ("MetalDonor.prot_pattern", "N", 1),
-            ("MetalDonor.prot_pattern", "[NH+]", 0),
-            ("MetalDonor.prot_pattern", "N-C=[SH2]", 0),
-            ("MetalDonor.prot_pattern", "[nH+]1ccccc1", 0),
-            ("MetalDonor.prot_pattern", "Nc1ccccc1", 0),
-            ("MetalDonor.prot_pattern", "o1cccc1", 0),
-            ("MetalDonor.prot_pattern", "COC=O", 2),
+            ("Hydrophobic.lig_pattern", "C", False, 0),
+            ("Hydrophobic.lig_pattern", "C=[SH2]", False, 0),
+            ("Hydrophobic.lig_pattern", "c1cscc1", False, 5),
+            ("Hydrophobic.lig_pattern", "c1cocc1", False, 2),
+            ("Hydrophobic.lig_pattern", "[*]SC", False, 1),
+            ("Hydrophobic.lig_pattern", "[*]CC", False, 1),
+            ("Hydrophobic.lig_pattern", "[*]C=C", False, 1),
+            ("Hydrophobic.lig_pattern", "[*]=C=C", False, 1),
+            ("Hydrophobic.lig_pattern", "[*]C(=C)C", False, 1),
+            ("Hydrophobic.lig_pattern", "[*]C(C)C", False, 1),
+            ("Hydrophobic.lig_pattern", "CS(C)(C)C", False, 0),
+            ("Hydrophobic.lig_pattern", "FC(F)(F)F", False, 0),
+            ("Hydrophobic.lig_pattern", "BrI", False, 2),
+            ("Hydrophobic.lig_pattern", "C=O", False, 0),
+            ("Hydrophobic.lig_pattern", "C=N", False, 0),
+            ("Hydrophobic.lig_pattern", "CF", False, 0),
+            ("Hydrophobic.lig_pattern", "Nc1ccccc1", False, 5),
+            ("Hydrophobic.lig_pattern", "[*]C(C)(C)C", False, 1),
+            ("HBAcceptor.prot_pattern", "[OH2]", True, 2),
+            ("HBAcceptor.prot_pattern", "[NH3]", True, 3),
+            ("HBAcceptor.prot_pattern", "[NH4+]", True, 4),
+            ("HBAcceptor.prot_pattern", "[SH2]", True, 2),
+            ("HBAcceptor.prot_pattern", "O=C=O", True, 0),
+            ("HBAcceptor.prot_pattern", "c1c[nH+]ccc1", True, 0),
+            ("HBAcceptor.prot_pattern", "c1c[nH]cc1", True, 1),
+            ("HBAcceptor.prot_pattern", "c1c[nH+]c[nH]1", True, 2),
+            ("HBAcceptor.prot_pattern", "C-N-C=O", True, 1),
+            ("HBAcceptor.lig_pattern", "O", False, 1),
+            ("HBAcceptor.lig_pattern", "N", False, 1),
+            ("HBAcceptor.lig_pattern", "[NH4+]", False, 0),
+            ("HBAcceptor.lig_pattern", "C-N-C=O", False, 1),
+            ("HBAcceptor.lig_pattern", "N-C=[SH2]", False, 0),
+            ("HBAcceptor.lig_pattern", "[nH+]1ccccc1", False, 0),
+            ("HBAcceptor.lig_pattern", "n1ccccc1", False, 1),
+            ("HBAcceptor.lig_pattern", "n(C)1cccc1", False, 0),
+            ("HBAcceptor.lig_pattern", "[nH]1cccc1", False, 0),
+            ("HBAcceptor.lig_pattern", "[nH+]1nc[nH]c1", False, 0),
+            ("HBAcceptor.lig_pattern", "c12c([nH]cc1)cccc2", False, 0),
+            ("HBAcceptor.lig_pattern", "Nc1ccccc1", False, 0),
+            ("HBAcceptor.lig_pattern", "C(=N)(N)N", False, 0),
+            ("HBAcceptor.lig_pattern", "N#C", False, 1),
+            ("HBAcceptor.lig_pattern", "o1cccc1", False, 1),
+            ("HBAcceptor.lig_pattern", "[o+](C)1cccc1", False, 0),
+            ("HBAcceptor.lig_pattern", "[*]-[N+](=O)-[O-]", False, 0),
+            ("HBAcceptor.lig_pattern", "COC=O", False, 1),
+            ("HBAcceptor.lig_pattern", "c1ccccc1Oc1ccccc1", False, 0),
+            ("HBAcceptor.lig_pattern", "FC", False, 1),
+            ("HBAcceptor.lig_pattern", "Fc1ccccc1", False, 1),
+            ("HBAcceptor.lig_pattern", "FCF", False, 0),
+            ("HBAcceptor.lig_pattern", "c1cc[n+](cc1)[O-]", False, 1),
+            ("XBAcceptor.prot_pattern", "CCl", False, 1),
+            ("XBAcceptor.prot_pattern", "c1ccccc1Cl", False, 1),
+            ("XBAcceptor.prot_pattern", "NCl", False, 1),
+            ("XBAcceptor.prot_pattern", "c1cccc[n+]1Cl", False, 1),
+            ("XBAcceptor.lig_pattern", "[NH3]", True, 3),
+            ("XBAcceptor.lig_pattern", "[NH+]C", True, 0),
+            ("XBAcceptor.lig_pattern", "c1ccccc1", True, 12),
+            ("XBAcceptor.lig_pattern", "C(=O)C", True, 1),
+            ("XBAcceptor.lig_pattern", "C#N", True, 0),
+            ("Cationic.lig_pattern", "[NH4+]", False, 1),
+            ("Cationic.lig_pattern", "[Ca+2]", False, 1),
+            ("Cationic.lig_pattern", "CC(=[NH2+])N", False, 2),
+            ("Cationic.lig_pattern", "NC(=[NH2+])N", False, 3),
+            ("Cationic.lig_pattern", "c1cc[n+](cc1)[O-]", False, 0),
+            ("Cationic.lig_pattern", "C-N=[N+]=[N-]", False, 0),
+            ("Cationic.lig_pattern", "N#[N+]-[N-2]", False, 0),
+            ("Cationic.prot_pattern", "c1cc[n+](cc1)[O-]", False, 0),
+            ("Cationic.prot_pattern", "[*]-[N+](=O)-[O-]", False, 0),
+            ("Cationic.prot_pattern", "C-N=[N+]=[N-]", False, 0),
+            ("Cationic.prot_pattern", "N#[N+]-[N-2]", False, 0),
+            ("Cationic.prot_pattern", "[Cl-]", False, 1),
+            ("Cationic.prot_pattern", "CC(=O)[O-]", False, 2),
+            ("Cationic.prot_pattern", "CS(=O)[O-]", False, 2),
+            ("Cationic.prot_pattern", "CP(=O)[O-]", False, 2),
+            ("CationPi.cation", "[NH4+]", False, 1),
+            ("CationPi.cation", "[Ca+2]", False, 1),
+            ("CationPi.cation", "CC(=[NH2+])N", False, 2),
+            ("CationPi.cation", "NC(=[NH2+])N", False, 3),
+            ("CationPi.cation", "C-N=[N+]=[N-]", False, 0),
+            ("CationPi.cation", "N#[N+]-[N-2]", False, 0),
+            ("CationPi.pi_ring", "c1ccccc1", False, 1),
+            ("CationPi.pi_ring", "c1cocc1", False, 1),
+            ("EdgeToFace.pi_ring", "c1ccccc1", False, 1),
+            ("EdgeToFace.pi_ring", "c1cocc1", False, 1),
+            ("FaceToFace.pi_ring", "c1ccccc1", False, 1),
+            ("FaceToFace.pi_ring", "c1cocc1", False, 1),
+            ("MetalDonor.lig_pattern", "[Mg]", False, 1),
+            ("MetalDonor.prot_pattern", "O", False, 1),
+            ("MetalDonor.prot_pattern", "N", False, 1),
+            ("MetalDonor.prot_pattern", "[NH+]", False, 0),
+            ("MetalDonor.prot_pattern", "N-C=[SH2]", False, 0),
+            ("MetalDonor.prot_pattern", "[nH+]1ccccc1", False, 0),
+            ("MetalDonor.prot_pattern", "Nc1ccccc1", False, 0),
+            ("MetalDonor.prot_pattern", "o1cccc1", False, 0),
+            ("MetalDonor.prot_pattern", "COC=O", False, 2),
+            ("MetalDonor.prot_pattern", "[*]-[N+](=O)-[O-]", False, 2),
+            (
+                "ImplicitHBAcceptor.lig_pattern",
+                "Nc1ncnc2c1ncn2[C@H]1C[C@H](O)[C@@H](CO)O1",
+                False,
+                6,
+            ),
+            (
+                "ImplicitHBAcceptor.prot_pattern",
+                "Nc1ncnc2c1ncn2[C@H]1C[C@H](O)[C@@H](CO)O1",
+                False,
+                3,
+            ),
+            ("ImplicitHBAcceptor.prot_pattern", "NC(C=O)Cc1c[nH]c[nH+]1", False, 3),
         ],
         indirect=["interaction_qmol"],
     )
     def test_smarts_matches(
-        self, interaction_qmol: Chem.Mol | list[Chem.Mol], smiles: str, expected: int
+        self,
+        interaction_qmol: Chem.Mol | list[Chem.Mol],
+        smiles: str,
+        explicit_h_only: bool,
+        expected: int,
     ) -> None:
+        m = Chem.MolFromSmiles(smiles)
+        mols = (
+            [("with", Chem.AddHs(m))]
+            if explicit_h_only
+            else [("without", m), ("with", Chem.AddHs(m))]
+        )
+        for name, mol in mols:
+            if isinstance(interaction_qmol, list):
+                n_matches = sum(
+                    len(mol.GetSubstructMatches(qmol)) for qmol in interaction_qmol
+                )
+            else:
+                n_matches = len(mol.GetSubstructMatches(interaction_qmol))
+            assert n_matches == expected, (
+                f"Found {n_matches} matches for mol {name} hydrogens, "
+                f"expected {expected}"
+            )
+
+    @pytest.mark.parametrize(
+        ("interaction_qmol", "smiles", "expected"),
+        [
+            (
+                "ImplicitHBAcceptor.lig_pattern",
+                "Nc1ncnc2c1ncn2[C@H]1C[C@H](O)[C@@H](CO)O1",
+                6,
+            ),
+            (
+                "ImplicitHBAcceptor.prot_pattern",
+                "Nc1ncnc2c1ncn2[C@H]1C[C@H](O)[C@@H](CO)O1",
+                3,
+            ),
+            ("ImplicitHBAcceptor.prot_pattern", "NC(C=O)Cc1c[nH]c[nH+]1", 3),
+        ],
+        indirect=["interaction_qmol"],
+    )
+    def test_implicit_smarts_matches(
+        self,
+        interaction_qmol: Chem.Mol | list[Chem.Mol],
+        smiles: str,
+        expected: int,
+    ) -> None:
+        # Test that implicit hydrogens are added to the query molecule
         mol = Chem.MolFromSmiles(smiles)
-        mol = Chem.AddHs(mol)
         if isinstance(interaction_qmol, list):
             n_matches = sum(
                 len(mol.GetSubstructMatches(qmol)) for qmol in interaction_qmol
@@ -403,6 +490,204 @@ class TestInteractions:
         assert fingerprint.edgetoface.any(lig, phe331)  # type: ignore[attr-defined]
         assert not fingerprint.facetoface.any(lig, phe331)  # type: ignore[attr-defined]
         assert fingerprint.pistacking.any(lig, phe331)  # type: ignore[attr-defined]
+
+    @pytest.mark.parametrize(
+        ("any_mol", "any_other_mol"),
+        [
+            ("ihb_acceptor_tyr167b", "ihb_ligand"),
+            ("ihb_asp95a", "ihb_ligand"),
+            ("ihb_ligand", "ihb_donor_h2o"),
+            ("ihb_donor_h2o", "ihb_donor_h2o"),  # self-interaction (hacky test)
+        ],
+        indirect=["any_mol", "any_other_mol"],
+    )
+    def test_implicithbacceptor_metadata_check(
+        self,
+        any_mol: "Molecule",
+        any_other_mol: "Molecule",
+        ihb_ignore_geometry_checks: bool,
+        ihb_include_water: bool,
+    ) -> None:
+        interaction = ImplicitHBAcceptor(
+            ignore_geometry_checks=ihb_ignore_geometry_checks,
+            include_water=ihb_include_water,
+        )
+        metadata = next(interaction.detect(any_mol[0], any_other_mol[0]), {})
+
+        # if water is involved in the interaction, no geometry checks are performed
+        if interaction.check_water_residue(
+            any_mol[0]
+        ) or interaction.check_water_residue(any_other_mol[0]):
+            # if the user wants to include water
+            if ihb_include_water:
+                if (
+                    not interaction.check_water_residue(any_mol[0])
+                    and not ihb_ignore_geometry_checks
+                ):
+                    # if the acceptor is not a water residue
+                    # and geometry checks are not ignored
+                    # acceptor atom angle deviation should be present
+                    assert "acceptor_atom_angle_deviation" in metadata
+
+                if (
+                    not interaction.check_water_residue(any_other_mol[0])
+                    and ihb_ignore_geometry_checks
+                ):
+                    # if the donor is not a water residue
+                    # and geometry checks are not ignored
+                    # donor atom angle deviation should be present
+                    assert "donor_atom_angle_deviation" in metadata
+
+                assert "vina_hbond_potential" in metadata
+
+            # if the user doesn't want to include water
+            else:
+                # (no interaction is detected)
+                assert metadata == {}
+
+        # For cases where water is not included
+        else:
+            assert "vina_hbond_potential" in metadata
+
+            if not ihb_ignore_geometry_checks:
+                # Geometry checks are only performed if water is not included
+                assert "donor_atom_angles" in metadata
+                assert "acceptor_atom_angles" in metadata
+                assert "ideal_donor_angle" in metadata
+                assert "ideal_acceptor_angle" in metadata
+                assert "donor_atom_angle_deviation" in metadata
+                assert "acceptor_atom_angle_deviation" in metadata
+
+                if (
+                    any_mol[0]
+                    .GetAtomWithIdx(metadata["indices"]["ligand"][0])
+                    .GetHybridization()
+                    == Chem.HybridizationType.SP2
+                ):
+                    assert "acceptor_plane_angle" in metadata
+
+                if (
+                    any_other_mol[0]
+                    .GetAtomWithIdx(metadata["indices"]["protein"][0])
+                    .GetHybridization()
+                    == Chem.HybridizationType.SP2
+                ):
+                    assert "donor_plane_angle" in metadata
+
+    @pytest.mark.parametrize(
+        (
+            "tolerance_daa",
+            "tolerance_aaa",
+            "tolerance_dpa",
+            "tolerance_apa",
+            "expected",
+        ),
+        [
+            (0, 45, 45, 90, False),
+            (10, 45, 45, 90, False),
+            (20, 45, 45, 90, False),
+            (30, 45, 45, 90, True),
+            (30, 30, 45, 90, True),
+            (30, 20, 45, 90, True),
+            (30, 10, 45, 90, True),
+            (30, 0, 45, 90, False),
+            (30, 1, 30, 90, True),
+            (30, 10, 20, 90, True),
+            (30, 10, 10, 90, True),
+            (30, 10, 0, 90, False),
+            (30, 10, 10, 45, True),
+            (30, 10, 10, 30, True),
+            (30, 10, 10, 15, True),
+            (30, 10, 10, 0, False),
+        ],
+    )
+    def test_implicithbacceptor_check_geometry_with_diff_tolerance(
+        self,
+        ihb_acceptor_tyr167b: "Molecule",
+        ihb_ligand: "Molecule",
+        tolerance_daa: float,
+        tolerance_aaa: float,
+        tolerance_dpa: float,
+        tolerance_apa: float,
+        expected: bool,
+    ) -> None:
+        interaction = ImplicitHBAcceptor(
+            tolerance_dev_daa=tolerance_daa,
+            tolerance_dev_dpa=tolerance_dpa,
+        )
+        interaction.tolerance_dev_aaa = tolerance_aaa
+        interaction.tolerance_dev_apa = tolerance_apa
+        assert (
+            next(interaction(ihb_acceptor_tyr167b[0], ihb_ligand[0]), False) == expected
+        )
+
+    def test_implicithbacceptor_get_atom_angles(
+        self,
+        ihb_ligand: "Molecule",
+        ihb_donor_h2o: "Molecule",
+    ) -> None:
+        interaction = ImplicitHBAcceptor()
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"No nearby heavy atoms found in residue HOH1._ "
+                r"for atom 'O' at index 0."
+            ),
+        ):
+            interaction._get_atom_angles(ihb_donor_h2o[0], 0, ihb_ligand[0], 13)
+
+    @pytest.mark.parametrize(
+        ("good_value", "bad_value", "expected"),
+        [
+            (0, 1, (1, 1)),
+            (-0.7, 0, (0.59, 0.6)),
+            (-0.7, -0.5, (0, 0)),
+        ],
+    )
+    def test_implicithbacceptor_add_vina_hbond_potential(
+        self,
+        ihb_ligand: "Molecule",
+        ihb_acceptor_tyr167b: "Molecule",
+        good_value: float,
+        bad_value: float,
+        expected: tuple[float, float],
+    ) -> None:
+        interaction = ImplicitHBAcceptor(
+            vina_potential_min=bad_value,
+            vina_potential_max=good_value,
+        )
+        metadata = next(interaction.detect(ihb_acceptor_tyr167b[0], ihb_ligand[0]))
+        metadata = interaction.add_vina_hbond_potential(
+            metadata,
+            lig_res=ihb_acceptor_tyr167b[0],
+            prot_res=ihb_ligand[0],
+        )
+        assert expected[0] <= metadata["vina_hbond_potential"] <= expected[1]
+
+    @pytest.mark.parametrize(
+        ("smiles", "expected_context"),
+        [
+            ("CC", nullcontext(109.5)),
+            ("C=C", nullcontext(120)),
+            ("C#C", nullcontext(180.0)),
+            (
+                "P(Cl)(Cl)(Cl)(Cl)Cl",
+                pytest.raises(
+                    KeyError, match=r"rdkit.Chem.rdchem.HybridizationType.SP3D"
+                ),
+            ),
+        ],
+    )
+    def test_ideal_atom_angle(
+        self,
+        smiles: str,
+        expected_context: "AbstractContextManager",
+    ) -> None:
+        mol = Chem.MolFromSmiles(smiles)
+
+        with expected_context as e:
+            ideal_angle = IDEAL_ATOM_ANGLES[mol.GetAtomWithIdx(0).GetHybridization()]
+            assert ideal_angle == e
 
 
 class TestBridgedInteractions:
